@@ -1,12 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { put } from "@vercel/blob";
 import { ensureSchema, pool } from "@/lib/db";
 import { getSessionRole, roleCanAccess } from "@/lib/auth";
 
 export const runtime = "nodejs";
-
-const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/heic", "image/heif", "image/webp", "application/pdf"];
-const MAX_BYTES = 15 * 1024 * 1024; // 15MB
 
 export async function POST(req: NextRequest) {
   const role = await getSessionRole();
@@ -16,17 +12,20 @@ export async function POST(req: NextRequest) {
 
   await ensureSchema();
 
-  const form = await req.formData();
+  const body = await req.json().catch(() => null);
+  if (!body) {
+    return NextResponse.json({ error: "Invalid submission." }, { status: 400 });
+  }
 
-  const repName = (form.get("repName") ?? "").toString().trim();
-  const salesTeam = (form.get("salesTeam") ?? "").toString().trim();
-  const customerName = (form.get("customerName") ?? "").toString().trim();
-  const customerAddress = (form.get("customerAddress") ?? "").toString().trim();
-  const downPaymentAmount = (form.get("downPaymentAmount") ?? "").toString().trim();
-  const depositDate = (form.get("depositDate") ?? "").toString().trim();
-  const notes = (form.get("notes") ?? "").toString().trim();
-  const checkPhoto = form.get("checkPhoto");
-  const depositSlip = form.get("depositSlip");
+  const repName = (body.repName ?? "").toString().trim();
+  const salesTeam = (body.salesTeam ?? "").toString().trim();
+  const customerName = (body.customerName ?? "").toString().trim();
+  const customerAddress = (body.customerAddress ?? "").toString().trim();
+  const downPaymentAmount = (body.downPaymentAmount ?? "").toString().trim();
+  const depositDate = (body.depositDate ?? "").toString().trim();
+  const notes = (body.notes ?? "").toString().trim();
+  const checkPhotoUrl = (body.checkPhotoUrl ?? "").toString().trim();
+  const depositSlipUrl = (body.depositSlipUrl ?? "").toString().trim();
 
   const missing: string[] = [];
   if (!repName) missing.push("Sales rep name");
@@ -35,8 +34,8 @@ export async function POST(req: NextRequest) {
   if (!customerAddress) missing.push("Customer address");
   if (!downPaymentAmount) missing.push("Down payment amount");
   if (!depositDate) missing.push("Deposit date");
-  if (!(checkPhoto instanceof File) || checkPhoto.size === 0) missing.push("Check photo");
-  if (!(depositSlip instanceof File) || depositSlip.size === 0) missing.push("Deposit slip photo");
+  if (!checkPhotoUrl) missing.push("Check photo");
+  if (!depositSlipUrl) missing.push("Deposit slip photo");
 
   if (missing.length) {
     return NextResponse.json(
@@ -45,49 +44,17 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const amount = Number(downPaymentAmount.replace(/[^0-9.]/g, ""));
+  // Only ever accept blob URLs from our own storage account, never arbitrary
+  // client-supplied URLs.
+  const blobHostPattern = /^https:\/\/[a-z0-9-]+\.public\.blob\.vercel-storage\.com\//i;
+  if (!blobHostPattern.test(checkPhotoUrl) || !blobHostPattern.test(depositSlipUrl)) {
+    return NextResponse.json({ error: "Invalid photo upload." }, { status: 400 });
+  }
+
+  const amount = Number(downPaymentAmount.toString().replace(/[^0-9.]/g, ""));
   if (Number.isNaN(amount) || amount < 0) {
     return NextResponse.json({ error: "Down payment amount is invalid." }, { status: 400 });
   }
-
-  for (const [label, file] of [
-    ["Check photo", checkPhoto],
-    ["Deposit slip photo", depositSlip],
-  ] as const) {
-    const f = file as File;
-    if (!ALLOWED_TYPES.includes(f.type)) {
-      return NextResponse.json(
-        { error: `${label} must be an image (JPG/PNG/HEIC/WEBP) or PDF.` },
-        { status: 400 }
-      );
-    }
-    if (f.size > MAX_BYTES) {
-      return NextResponse.json({ error: `${label} is too large (max 15MB).` }, { status: 400 });
-    }
-  }
-
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
-    return NextResponse.json(
-      { error: "File storage is not configured (missing BLOB_READ_WRITE_TOKEN)." },
-      { status: 500 }
-    );
-  }
-
-  const stamp = Date.now();
-  const safeCustomer = customerName.replace(/[^a-z0-9]+/gi, "-").slice(0, 40);
-
-  const [checkBlob, slipBlob] = await Promise.all([
-    put(
-      `checks/${stamp}-${safeCustomer}-check.${extFor(checkPhoto as File)}`,
-      checkPhoto as File,
-      { access: "public" }
-    ),
-    put(
-      `checks/${stamp}-${safeCustomer}-deposit-slip.${extFor(depositSlip as File)}`,
-      depositSlip as File,
-      { access: "public" }
-    ),
-  ]);
 
   const result = await pool.query(
     `INSERT INTO submissions
@@ -101,8 +68,8 @@ export async function POST(req: NextRequest) {
       customerAddress,
       amount,
       depositDate,
-      checkBlob.url,
-      slipBlob.url,
+      checkPhotoUrl,
+      depositSlipUrl,
       notes || null,
     ]
   );
@@ -133,14 +100,4 @@ export async function GET(req: NextRequest) {
 
   const result = await pool.query(query, params);
   return NextResponse.json({ submissions: result.rows });
-}
-
-function extFor(file: File): string {
-  if (file.type === "image/jpeg") return "jpg";
-  if (file.type === "image/png") return "png";
-  if (file.type === "image/webp") return "webp";
-  if (file.type === "image/heic") return "heic";
-  if (file.type === "image/heif") return "heif";
-  if (file.type === "application/pdf") return "pdf";
-  return "bin";
 }
