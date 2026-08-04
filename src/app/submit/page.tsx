@@ -1,13 +1,29 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { upload } from "@vercel/blob/client";
 
 type Status = "idle" | "submitting" | "success" | "error";
+
+function safeSegment(value: string) {
+  return value.replace(/[^a-z0-9]+/gi, "-").slice(0, 40) || "unknown";
+}
+
+function extFor(file: File): string {
+  if (file.type === "image/jpeg") return "jpg";
+  if (file.type === "image/png") return "png";
+  if (file.type === "image/webp") return "webp";
+  if (file.type === "image/heic") return "heic";
+  if (file.type === "image/heif") return "heif";
+  if (file.type === "application/pdf") return "pdf";
+  return "bin";
+}
 
 export default function SubmitPage() {
   const formRef = useRef<HTMLFormElement>(null);
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<string | null>(null);
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -17,19 +33,89 @@ export default function SubmitPage() {
     const form = e.currentTarget;
     const data = new FormData(form);
 
+    const repName = (data.get("repName") ?? "").toString().trim();
+    const salesTeam = (data.get("salesTeam") ?? "").toString().trim();
+    const customerName = (data.get("customerName") ?? "").toString().trim();
+    const customerAddress = (data.get("customerAddress") ?? "").toString().trim();
+    const downPaymentAmount = (data.get("downPaymentAmount") ?? "").toString().trim();
+    const depositDate = (data.get("depositDate") ?? "").toString().trim();
+    const notes = (data.get("notes") ?? "").toString().trim();
+    const checkPhoto = data.get("checkPhoto");
+    const depositSlip = data.get("depositSlip");
+
+    if (!(checkPhoto instanceof File) || checkPhoto.size === 0) {
+      setError("Please choose a check photo.");
+      setStatus("error");
+      return;
+    }
+    if (!(depositSlip instanceof File) || depositSlip.size === 0) {
+      setError("Please choose a deposit slip photo.");
+      setStatus("error");
+      return;
+    }
+
+    const stamp = Date.now();
+    const safeCustomer = safeSegment(customerName);
+
     try {
-      const res = await fetch("/api/submissions", { method: "POST", body: data });
+      setProgress("Uploading check photo...");
+      const checkBlob = await upload(
+        `checks/${stamp}-${safeCustomer}-check.${extFor(checkPhoto)}`,
+        checkPhoto,
+        {
+          access: "public",
+          handleUploadUrl: "/api/blob-upload",
+          onUploadProgress: (p) =>
+            setProgress(`Uploading check photo... ${Math.round(p.percentage)}%`),
+        }
+      );
+
+      setProgress("Uploading deposit slip photo...");
+      const slipBlob = await upload(
+        `checks/${stamp}-${safeCustomer}-deposit-slip.${extFor(depositSlip)}`,
+        depositSlip,
+        {
+          access: "public",
+          handleUploadUrl: "/api/blob-upload",
+          onUploadProgress: (p) =>
+            setProgress(`Uploading deposit slip photo... ${Math.round(p.percentage)}%`),
+        }
+      );
+
+      setProgress("Saving submission...");
+      const res = await fetch("/api/submissions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          repName,
+          salesTeam,
+          customerName,
+          customerAddress,
+          downPaymentAmount,
+          depositDate,
+          notes,
+          checkPhotoUrl: checkBlob.url,
+          depositSlipUrl: slipBlob.url,
+        }),
+      });
       const result = await res.json();
       if (!res.ok) {
         setError(result.error || "Something went wrong. Please try again.");
         setStatus("error");
+        setProgress(null);
         return;
       }
       setStatus("success");
+      setProgress(null);
       form.reset();
-    } catch {
-      setError("Network error. Please check your connection and try again.");
+    } catch (err) {
+      setError(
+        err instanceof Error && err.message
+          ? err.message
+          : "Upload failed. Please check your connection and try again."
+      );
       setStatus("error");
+      setProgress(null);
     }
   }
 
@@ -91,6 +177,12 @@ export default function SubmitPage() {
           {error && (
             <div className="rounded-md bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
               {error}
+            </div>
+          )}
+
+          {progress && status === "submitting" && (
+            <div className="rounded-md bg-blue-50 border border-blue-200 px-3 py-2 text-sm text-blue-700">
+              {progress}
             </div>
           )}
 
