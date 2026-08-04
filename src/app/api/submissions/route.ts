@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ensureSchema, pool } from "@/lib/db";
 import { getSessionRole, roleCanAccess } from "@/lib/auth";
+import { sendSubmissionNotification } from "@/lib/email";
 
 export const runtime = "nodejs";
 
@@ -73,6 +74,21 @@ export async function POST(req: NextRequest) {
       notes || null,
     ]
   );
+
+  // Notify the team distribution list. Failures here are logged and
+  // swallowed inside sendSubmissionNotification so a flaky email provider
+  // never prevents the submission itself from succeeding.
+  await sendSubmissionNotification({
+    repName,
+    salesTeam,
+    customerName,
+    customerAddress,
+    downPaymentAmount: amount,
+    depositDate,
+    checkPhotoUrl,
+    depositSlipUrl,
+    notes: notes || null,
+  });
 
   return NextResponse.json({ ok: true, id: result.rows[0].id });
 }
